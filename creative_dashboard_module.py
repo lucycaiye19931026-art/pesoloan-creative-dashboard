@@ -182,7 +182,8 @@ def collect(month):
   for d,v in x['daily'].items():
    if d.startswith(month):
     for f in trend[d]:trend[d][f]+=v.get(f,0)
- summary={'creatives':len([x for x in items if x['spend']>0]),'new_creatives':sum(x['is_new'] and x['spend']>0 for x in items),'surge_creatives':sum(x['is_surge'] for x in items),'spend':round(sum(x['spend'] for x in items),2),'loans':sum(x['loans'] for x in items),'source_errors':len(errors)}; summary['cps']=round(summary['spend']/summary['loans'],2) if summary['loans'] else None
+ active=[x for x in items if x['spend']>0]
+ summary={'creatives':len(active),'new_creatives':sum(x['is_new'] for x in active),'surge_creatives':sum(x['is_surge'] for x in active),'spend':round(sum(x['spend'] for x in active),2),'loans':sum(x['loans'] for x in active),'source_errors':len(errors)}; summary['cps']=round(summary['spend']/summary['loans'],2) if summary['loans'] else None
  return {'ok':True,'month':month,'range':{'start':start,'end':end,'pool_start':pool},'currency':'USD','data_time':now8().isoformat(),'summary':summary,'trend':dict(sorted(trend.items())),'items':items,'errors':errors}
 
 def register_creative_dashboard(app):
