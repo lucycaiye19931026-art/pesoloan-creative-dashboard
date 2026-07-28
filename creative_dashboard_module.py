@@ -3,7 +3,8 @@ Usage: from creative_dashboard_module import register_creative_dashboard; regist
 参数全部从Render Environment读取；本模块不保存任何凭证。
 Example: python creative_dashboard_app.py --port 5050
 """
-import os, json, time, calendar, re
+import os, json, time, calendar, re, threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 import requests
@@ -149,9 +150,23 @@ def aggregate(rows,month):
  out.sort(key=lambda x:-x['spend']); return out,errors
 
 def collect(month):
- start,end=month_range(month); pool=os.getenv('CREATIVE_POOL_START','2026-06-01'); cfg=config(); rows=[]
- rows+=fb_rows('android',cfg['fb_android'],pool,end); rows+=fb_rows('ios',cfg['fb_ios'],pool,end); rows+=tt_rows('android',cfg['tt_android'],pool,end); rows+=tt_rows('ios',cfg['tt_ios'],pool,end); rows+=gg_rows(cfg['gg_android'],pool,end)
- aa,ae=adjust_rows('android',pool,end); ia,ie=adjust_rows('ios',pool,end); rows=merge_adjust([x for x in rows if x.get('side')=='android'],aa)+merge_adjust([x for x in rows if x.get('side')=='ios'],ia)
+ start,end=month_range(month); pool=os.getenv('CREATIVE_POOL_START','2026-06-01'); cfg=config(); rows=[]; adj={}
+ jobs=[]
+ for aid in cfg['fb_android']: jobs.append(('rows',fb_rows,('android',[aid],pool,end)))
+ for aid in cfg['fb_ios']: jobs.append(('rows',fb_rows,('ios',[aid],pool,end)))
+ jobs += [('rows',tt_rows,('android',cfg['tt_android'],pool,end)),('rows',tt_rows,('ios',cfg['tt_ios'],pool,end)),('rows',gg_rows,(cfg['gg_android'],pool,end)),('adj_android',adjust_rows,('android',pool,end)),('adj_ios',adjust_rows,('ios',pool,end))]
+ with ThreadPoolExecutor(max_workers=12) as ex:
+  futures={ex.submit(fn,*args):kind for kind,fn,args in jobs}
+  for f in as_completed(futures):
+   kind=futures[f]
+   try:
+    value=f.result()
+    if kind=='rows': rows.extend(value or [])
+    else: adj[kind]=value
+   except Exception as e:
+    if kind=='rows': rows.append({'side':'unknown','channel':'unknown','source_status':'error','source_error':str(e)[:120]})
+    else: adj[kind]=([],str(e)[:120])
+ aa,ae=adj.get('adj_android',([], 'adjust android timeout')); ia,ie=adj.get('adj_ios',([], 'adjust ios timeout')); rows=merge_adjust([x for x in rows if x.get('side')=='android'],aa)+merge_adjust([x for x in rows if x.get('side')=='ios'],ia)+[x for x in rows if x.get('side') not in ('android','ios')]
  items,errors=aggregate(rows,month); errors += ([{'side':'android','channel':'adjust','source_status':'error','source_error':ae}] if ae else []) + ([{'side':'ios','channel':'adjust','source_status':'error','source_error':ie}] if ie else [])
  trend=defaultdict(lambda:{'spend':0,'impressions':0,'clicks':0,'loans':0})
  for x in items:
