@@ -95,8 +95,9 @@ def tt_rows(side,adv,start,end):
    if q.json().get('code')==0:
     for a in (q.json().get('data') or {}).get('list',[]): meta[str(a.get('ad_id'))]=a
   video_ids=list({str(a.get('video_id')) for a in meta.values() if a.get('video_id')}); video_meta={}
-  for i in range(0,len(video_ids),100):
-   vq=requests.get(f'{TT_BASE}/file/video/ad/info/',headers=headers,timeout=45,params={'advertiser_id':adv,'video_ids':json.dumps(video_ids[i:i+100])}); vd=vq.json()
+  # TikTok官方限制：/file/video/ad/info 每次最多60个video_ids。
+  for i in range(0,len(video_ids),60):
+   vq=requests.get(f'{TT_BASE}/file/video/ad/info/',headers=headers,timeout=45,params={'advertiser_id':adv,'video_ids':json.dumps(video_ids[i:i+60])}); vd=vq.json()
    if vd.get('code')==0:
     for v in (vd.get('data') or {}).get('list',[]): video_meta[str(v.get('video_id'))]=v
   for x in rows:
