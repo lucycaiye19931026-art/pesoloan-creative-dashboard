@@ -33,7 +33,9 @@ def env_list(name): return [x.strip() for x in os.getenv(name,'').split(',') if 
 FB_ANDROID_DEFAULT=['2043458276522117','1338744840870824','554870820824463','1763443588125609','4425161567801548','3511882642320376','1654205562363513','1054117987058016','1842012880095946','1071912668521082','1016349321026924','893146393853948','1082060041158190','2468093726992507','1554822826379992']
 FB_IOS_DEFAULT=['826668223504196','485941130935481','1050911951210157','2487386801730510']
 def config():
- return {'fb_android':env_list('CREATIVE_FB_ANDROID_IDS') or env_list('FB_ACT_IDS') or FB_ANDROID_DEFAULT,'fb_ios':env_list('CREATIVE_FB_IOS_IDS') or env_list('FB_IOS_ACT_IDS') or FB_IOS_DEFAULT,'tt_android':os.getenv('TT_ADV_ID',''),'tt_ios':os.getenv('TT_IOS_ADV_ID',''),'gg_android':env_list('GG_CUSTOMER_IDS') or ['3375325268','4223410058']}
+ tt_android=env_list('TT_ADV_IDS') or ([os.getenv('TT_ADV_ID','')] if os.getenv('TT_ADV_ID','') else [])
+ tt_ios=env_list('TT_IOS_ADV_IDS') or ([os.getenv('TT_IOS_ADV_ID','')] if os.getenv('TT_IOS_ADV_ID','') else [])
+ return {'fb_android':env_list('CREATIVE_FB_ANDROID_IDS') or env_list('FB_ACT_IDS') or FB_ANDROID_DEFAULT,'fb_ios':env_list('CREATIVE_FB_IOS_IDS') or env_list('FB_IOS_ACT_IDS') or FB_IOS_DEFAULT,'tt_android':tt_android,'tt_ios':tt_ios,'gg_android':env_list('GG_CUSTOMER_IDS') or ['3375325268','4223410058']}
 
 def base_row(side,channel,account_id,cid,name,day):
  return {'side':side,'channel':channel,'account_id':str(account_id),'creative_id':str(cid),'creative_name':name or str(cid),'day':day,'format':'unknown','spend':0.0,'impressions':0,'clicks':0,'loans':0,'preview_url':None,'media_url':None,'player_type':None,'download_url':None,'created_time':None,'source_status':'ok','attribution_status':'unmatched'}
@@ -74,10 +76,15 @@ def tt_rows(side,adv,start,end):
  try:
   rows=[]
   for chunk_start,chunk_end in date_chunks(start,end,30):
-   r=requests.get(f'{TT_BASE}/report/integrated/get/',headers=headers,timeout=45,params={'advertiser_id':adv,'report_type':'BASIC','data_level':'AUCTION_AD','dimensions':json.dumps(['ad_id','stat_time_day']),'metrics':json.dumps(['ad_name','spend','impressions','clicks']),'start_date':chunk_start,'end_date':chunk_end,'page_size':1000})
-   d=r.json()
-   if d.get('code')!=0: raise RuntimeError(f"code {d.get('code')}: {d.get('message','')}")
-   rows.extend((d.get('data') or {}).get('list',[]))
+   page=1
+   while True:
+    r=requests.get(f'{TT_BASE}/report/integrated/get/',headers=headers,timeout=45,params={'advertiser_id':adv,'report_type':'BASIC','data_level':'AUCTION_AD','dimensions':json.dumps(['ad_id','stat_time_day']),'metrics':json.dumps(['ad_name','spend','impressions','clicks']),'start_date':chunk_start,'end_date':chunk_end,'page_size':1000,'page':page})
+    d=r.json()
+    if d.get('code')!=0: raise RuntimeError(f"code {d.get('code')}: {d.get('message','')}")
+    batch=(d.get('data') or {}).get('list',[]); rows.extend(batch); info=(d.get('data') or {}).get('page_info') or {}
+    total_page=int(info.get('total_page') or 0)
+    if not batch or len(batch)<1000 or (total_page and page>=total_page): break
+    page+=1
   ids=list({str((x.get('dimensions') or {}).get('ad_id')) for x in rows})
   meta={}
   for i in range(0,len(ids),100):
@@ -110,8 +117,11 @@ def gg_rows(customers,start,end):
    for b in batches:
     for x in b.get('results',[]):
      ad=x.get('adGroupAd',{}).get('ad',{}); asset=x.get('asset',{}); met=x.get('metrics',{}); seg=x.get('segments',{}); aid=str(ad.get('id','')); cid2=str(asset.get('id') or aid); typ=str(asset.get('type','')).upper()
-     image=((asset.get('imageAsset') or {}).get('fullSize') or {}).get('url'); video=(asset.get('youtubeVideoAsset') or {}).get('youtubeVideoId'); preview=image or (f'https://i.ytimg.com/vi/{video}/hqdefault.jpg' if video else None)
-     z=base_row('android','google',cid,cid2,asset.get('name') or cid2,seg.get('date')); z.update(spend=round(num(met.get('costMicros'))/1e6,2),impressions=int(num(met.get('impressions'))),clicks=int(num(met.get('clicks'))),format='video' if video or 'VIDEO' in typ else 'image',preview_url=preview,media_url=f'https://www.youtube.com/embed/{video}?autoplay=1&rel=0' if video else image,player_type='youtube' if video else 'image',download_url=image,ad_id=aid); out.append(z)
+     image=((asset.get('imageAsset') or {}).get('fullSize') or {}).get('url'); video=(asset.get('youtubeVideoAsset') or {}).get('youtubeVideoId')
+     # ad_group_ad_asset_view也会返回标题、描述等文字Asset；素材看板只允许真实图片/视频。
+     if not image and not video: continue
+     preview=image or f'https://i.ytimg.com/vi/{video}/hqdefault.jpg'; fmt='video' if video else 'image'
+     z=base_row('android','google',cid,cid2,asset.get('name') or cid2,seg.get('date')); z.update(spend=round(num(met.get('costMicros'))/1e6,2),impressions=int(num(met.get('impressions'))),clicks=int(num(met.get('clicks'))),format=fmt,preview_url=preview,media_url=f'https://www.youtube.com/embed/{video}?autoplay=1&rel=0' if video else image,player_type='youtube' if video else 'image',download_url=image,ad_id=aid); out.append(z)
   except Exception as e: out.append({'side':'android','channel':'google','account_id':cid,'source_status':'error','source_error':str(e)[:120]})
  return out
 
@@ -163,7 +173,9 @@ def collect(month):
  jobs=[]
  for aid in cfg['fb_android']: jobs.append(('rows',fb_rows,('android',[aid],pool,end)))
  for aid in cfg['fb_ios']: jobs.append(('rows',fb_rows,('ios',[aid],pool,end)))
- jobs += [('rows',tt_rows,('android',cfg['tt_android'],pool,end)),('rows',tt_rows,('ios',cfg['tt_ios'],pool,end)),('rows',gg_rows,(cfg['gg_android'],pool,end)),('adj_android',adjust_rows,('android',pool,end)),('adj_ios',adjust_rows,('ios',pool,end))]
+ for aid in cfg['tt_android']: jobs.append(('rows',tt_rows,('android',aid,pool,end)))
+ for aid in cfg['tt_ios']: jobs.append(('rows',tt_rows,('ios',aid,pool,end)))
+ jobs += [('rows',gg_rows,(cfg['gg_android'],pool,end)),('adj_android',adjust_rows,('android',pool,end)),('adj_ios',adjust_rows,('ios',pool,end))]
  with ThreadPoolExecutor(max_workers=12) as ex:
   futures={ex.submit(fn,*args):kind for kind,fn,args in jobs}
   for f in as_completed(futures):
