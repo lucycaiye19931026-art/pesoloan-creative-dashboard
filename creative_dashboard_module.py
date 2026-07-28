@@ -22,6 +22,9 @@ def num(v):
  try:return float(v or 0)
  except:return 0.0
 def norm(v): return re.sub(r'[^a-z0-9]+','',str(v or '').lower())
+def secure_url(v):
+ s=str(v or '').strip()
+ return 'https://'+s[7:] if s.startswith('http://') else s
 def month_range(month):
  if not re.fullmatch(r'\d{4}-\d{2}',month or ''): month=now8().strftime('%Y-%m')
  y,m=map(int,month.split('-')); last=calendar.monthrange(y,m)[1]
@@ -98,7 +101,8 @@ def tt_rows(side,adv,start,end):
     for v in (vd.get('data') or {}).get('list',[]): video_meta[str(v.get('video_id'))]=v
   for x in rows:
    dim=x.get('dimensions') or {}; m=x.get('metrics') or {}; cid=str(dim.get('ad_id','')); a=meta.get(cid,{}); vid=str(a.get('video_id') or ''); vm=video_meta.get(vid,{}); images=a.get('image_ids') or []; is_video=bool(vid)
-   z=base_row(side,'tiktok',adv,cid,a.get('ad_name') or m.get('ad_name'),str(dim.get('stat_time_day',''))[:10]); z.update(spend=round(num(m.get('spend')),2),impressions=int(num(m.get('impressions'))),clicks=int(num(m.get('clicks'))),format='video' if is_video else 'image',preview_url=vm.get('video_cover_url'),media_url=vm.get('play_url') or vm.get('video_url'),player_type='video' if is_video else 'image',download_url=vm.get('play_url') or vm.get('video_url'),created_time=a.get('create_time'),image_ids=images); out.append(z)
+   cover=secure_url(vm.get('video_cover_url') or vm.get('cover_url') or vm.get('poster_url')); media=secure_url(vm.get('preview_url') or vm.get('play_url') or vm.get('video_url'))
+   z=base_row(side,'tiktok',adv,cid,a.get('ad_name') or m.get('ad_name'),str(dim.get('stat_time_day',''))[:10]); z.update(spend=round(num(m.get('spend')),2),impressions=int(num(m.get('impressions'))),clicks=int(num(m.get('clicks'))),format='video' if is_video else 'image',preview_url=cover,media_url=media,player_type='video' if is_video else 'image',download_url=media,created_time=a.get('create_time'),image_ids=images); out.append(z)
  except Exception as e: out.append({'side':side,'channel':'tiktok','account_id':adv,'source_status':'error','source_error':str(e)[:120]})
  return out
 
