@@ -62,14 +62,23 @@ def fb_rows(side,acts,start,end):
   except Exception as e: out.append({'side':side,'channel':'facebook','account_id':aid,'source_status':'error','source_error':str(e)[:120]})
  return out
 
+def date_chunks(start,end,days=30):
+ cur=datetime.strptime(start,'%Y-%m-%d').date(); stop=datetime.strptime(end,'%Y-%m-%d').date(); out=[]
+ while cur<=stop:
+  chunk_end=min(cur+timedelta(days=days-1),stop); out.append((cur.isoformat(),chunk_end.isoformat())); cur=chunk_end+timedelta(days=1)
+ return out
+
 def tt_rows(side,adv,start,end):
  if not adv:return []
  out=[]; token=os.getenv('TT_ACCESS_TOKEN',''); headers={'Access-Token':token}
  try:
-  r=requests.get(f'{TT_BASE}/report/integrated/get/',headers=headers,timeout=45,params={'advertiser_id':adv,'report_type':'BASIC','data_level':'AUCTION_AD','dimensions':json.dumps(['ad_id','stat_time_day']),'metrics':json.dumps(['ad_name','spend','impressions','clicks']),'start_date':start,'end_date':end,'page_size':1000})
-  d=r.json()
-  if d.get('code')!=0: raise RuntimeError(f"code {d.get('code')}: {d.get('message','')}")
-  rows=(d.get('data') or {}).get('list',[]); ids=list({str((x.get('dimensions') or {}).get('ad_id')) for x in rows})
+  rows=[]
+  for chunk_start,chunk_end in date_chunks(start,end,30):
+   r=requests.get(f'{TT_BASE}/report/integrated/get/',headers=headers,timeout=45,params={'advertiser_id':adv,'report_type':'BASIC','data_level':'AUCTION_AD','dimensions':json.dumps(['ad_id','stat_time_day']),'metrics':json.dumps(['ad_name','spend','impressions','clicks']),'start_date':chunk_start,'end_date':chunk_end,'page_size':1000})
+   d=r.json()
+   if d.get('code')!=0: raise RuntimeError(f"code {d.get('code')}: {d.get('message','')}")
+   rows.extend((d.get('data') or {}).get('list',[]))
+  ids=list({str((x.get('dimensions') or {}).get('ad_id')) for x in rows})
   meta={}
   for i in range(0,len(ids),100):
    q=requests.get(f'{TT_BASE}/ad/get/',headers=headers,timeout=45,params={'advertiser_id':adv,'filtering':json.dumps({'ad_ids':ids[i:i+100]}),'fields':json.dumps(['ad_id','ad_name','create_time','image_ids','video_id']),'page_size':100})
@@ -146,7 +155,7 @@ def aggregate(rows,month):
   for i,g in enumerate(sorted(arr,key=lambda x:-x['spend']),1):g['month_rank']=i
  _,month_end=month_range(month); end_date=datetime.strptime(month_end,'%Y-%m-%d').date(); anchor=now8().date() if month==now8().strftime('%Y-%m') else end_date+timedelta(days=1); last=[(anchor-timedelta(days=i)).isoformat() for i in range(1,4)]; prev=[(anchor-timedelta(days=i)).isoformat() for i in range(4,7)]
  for g in out:
-  a=sum(g['daily'].get(d,{}).get('spend',0) for d in last); b=sum(g['daily'].get(d,{}).get('spend',0) for d in prev); growth=((a/3)/(b/3)-1)*100 if b>0 else (999 if a>0 else 0); g['recent3_spend']=round(a,2); g['previous3_spend']=round(b,2); g['spend_growth_pct']=round(growth,2); g['is_surge']=growth>=50 and a>=50 and g.get('month_rank',999)<=10
+  a=sum(g['daily'].get(d,{}).get('spend',0) for d in last); b=sum(g['daily'].get(d,{}).get('spend',0) for d in prev); growth=((a/3)/(b/3)-1)*100 if b>0 else (999 if a>0 else 0); g['recent3_spend']=round(a,2); g['previous3_spend']=round(b,2); g['spend_growth_pct']=round(growth,2); g['is_surge']=growth>=50 and a>=50 and g.get('month_rank',999)<=10; g['daily']={d:v for d,v in g['daily'].items() if d.startswith(month)}
  out.sort(key=lambda x:-x['spend']); return out,errors
 
 def collect(month):
