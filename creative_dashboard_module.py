@@ -15,7 +15,7 @@ TT_BASE='https://business-api.tiktok.com/open_api/v1.3'
 GG_VER='v24'
 ADJ_URL='https://automate.adjust.com/reports-service/report'
 CACHE={'data':{},'ts':{}}
-TTL=300
+TTL=86400  # 月度素材数据缓存24小时；无需实时刷新
 
 def now8(): return datetime.now(timezone(timedelta(hours=8)))
 def num(v):
@@ -210,5 +210,7 @@ def register_creative_dashboard(app):
  @app.route('/dashboard-api/creative-performance')
  def creative_api():
   month=request.args.get('month') or now8().strftime('%Y-%m'); key=month; t=time.time()
-  if key in CACHE['data'] and t-CACHE['ts'].get(key,0)<TTL:return jsonify({**CACHE['data'][key],'cached':True})
-  p=collect(month); CACHE['data'][key]=p; CACHE['ts'][key]=t; return jsonify({**p,'cached':False})
+  if key in CACHE['data'] and t-CACHE['ts'].get(key,0)<TTL:
+   resp=jsonify({**CACHE['data'][key],'cached':True}); resp.headers['Cache-Control']='public, max-age=86400'; return resp
+  p=collect(month); CACHE['data'][key]=p; CACHE['ts'][key]=t
+  resp=jsonify({**p,'cached':False}); resp.headers['Cache-Control']='public, max-age=86400'; return resp
