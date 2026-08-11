@@ -103,7 +103,7 @@ def tt_rows(side,adv,start,end):
   for x in rows:
    dim=x.get('dimensions') or {}; m=x.get('metrics') or {}; cid=str(dim.get('ad_id','')); a=meta.get(cid,{}); vid=str(a.get('video_id') or ''); vm=video_meta.get(vid,{}); images=a.get('image_ids') or []; is_video=bool(vid)
    cover=secure_url(vm.get('video_cover_url') or vm.get('cover_url') or vm.get('poster_url')); media=secure_url(vm.get('preview_url') or vm.get('play_url') or vm.get('video_url'))
-   z=base_row(side,'tiktok',adv,cid,a.get('ad_name') or m.get('ad_name'),str(dim.get('stat_time_day',''))[:10]); z.update(spend=round(num(m.get('spend')),2),impressions=int(num(m.get('impressions'))),clicks=int(num(m.get('clicks'))),format='video' if is_video else 'image',preview_url=cover,media_url=media,player_type='video' if is_video else 'image',download_url=media,created_time=a.get('create_time'),image_ids=images); out.append(z)
+   z=base_row(side,'tiktok',adv,cid,a.get('ad_name') or m.get('ad_name'),str(dim.get('stat_time_day',''))[:10]); z.update(spend=round(num(m.get('spend')),2),impressions=int(num(m.get('impressions'))),clicks=int(num(m.get('clicks'))),format='video' if is_video else 'image',preview_url=cover,media_url=media,player_type='video' if is_video else 'image',download_url=media,created_time=a.get('create_time'),image_ids=images,video_id=vid); out.append(z)
  except Exception as e: out.append({'side':side,'channel':'tiktok','account_id':adv,'source_status':'error','source_error':str(e)[:120]})
  return out
 
@@ -159,7 +159,7 @@ def merge_adjust(rows,adj):
 def aggregate(rows,month):
  good=[x for x in rows if x.get('source_status')=='ok']; errors=[x for x in rows if x.get('source_status')!='ok']; groups={}
  for x in good:
-  k=(x['side'],x['channel'],x['account_id'],x['creative_id']); g=groups.setdefault(k,{z:x.get(z) for z in ['side','channel','account_id','creative_id','creative_name','format','preview_url','media_url','player_type','download_url','created_time','attribution_status']}); g.setdefault('daily',{}); d=g['daily'].setdefault(x['day'],{'spend':0,'impressions':0,'clicks':0,'loans':0,'attribution_clicks':0});
+  k=(x['side'],x['channel'],x['account_id'],x['creative_id']); g=groups.setdefault(k,{z:x.get(z) for z in ['side','channel','account_id','creative_id','creative_name','format','preview_url','media_url','player_type','download_url','created_time','attribution_status','video_id']}); g.setdefault('daily',{}); d=g['daily'].setdefault(x['day'],{'spend':0,'impressions':0,'clicks':0,'loans':0,'attribution_clicks':0});
   for f in d:d[f]+=num(x.get(f))
  out=[]
  for g in groups.values():
@@ -214,3 +214,20 @@ def register_creative_dashboard(app):
    resp=jsonify({**CACHE['data'][key],'cached':True}); resp.headers['Cache-Control']='public, max-age=86400'; return resp
   p=collect(month); CACHE['data'][key]=p; CACHE['ts'][key]=t
   resp=jsonify({**p,'cached':False}); resp.headers['Cache-Control']='public, max-age=86400'; return resp
+ @app.route('/dashboard-api/tiktok-video-url')
+ def tiktok_video_url():
+  advertiser_id=str(request.args.get('account_id') or '')
+  video_id=str(request.args.get('video_id') or '')
+  allowed=set(config()['tt_android']+config()['tt_ios'])
+  if advertiser_id not in allowed or not re.fullmatch(r'[A-Za-z0-9_-]+',video_id):
+   return jsonify({'ok':False,'error':'invalid account_id or video_id'}),400
+  try:
+   r=requests.get(f'{TT_BASE}/file/video/ad/info/',headers={'Access-Token':os.getenv('TT_ACCESS_TOKEN','')},timeout=30,params={'advertiser_id':advertiser_id,'video_ids':json.dumps([video_id])})
+   body=r.json()
+   if body.get('code')!=0:return jsonify({'ok':False,'error':f"tiktok code {body.get('code')}"}),502
+   rows=(body.get('data') or {}).get('list',[]); v=rows[0] if rows else {}
+   cover=secure_url(v.get('video_cover_url') or v.get('cover_url') or v.get('poster_url'))
+   media=secure_url(v.get('preview_url') or v.get('play_url') or v.get('video_url'))
+   if not media:return jsonify({'ok':False,'error':'playable url unavailable'}),404
+   resp=jsonify({'ok':True,'media_url':media,'preview_url':cover}); resp.headers['Cache-Control']='no-store'; return resp
+  except Exception:return jsonify({'ok':False,'error':'tiktok video refresh failed'}),502
