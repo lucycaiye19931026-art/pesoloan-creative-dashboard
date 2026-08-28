@@ -15,6 +15,8 @@ TT_BASE='https://business-api.tiktok.com/open_api/v1.3'
 GG_VER='v24'
 ADJ_URL='https://automate.adjust.com/reports-service/report'
 CACHE={'data':{},'ts':{}}
+COLLECT_STATE={}
+COLLECT_GUARD=threading.Lock()
 TTL=86400  # 月度素材数据缓存24小时；无需实时刷新
 
 def now8(): return datetime.now(timezone(timedelta(hours=8)))
@@ -55,11 +57,11 @@ def fb_rows(side,acts,start,end):
    for i in range(0,len(adids),50):
     q=requests.get(FB_BASE,timeout=45,params={'access_token':token,'ids':','.join(adids[i:i+50]),'fields':'name,created_time,creative{id,name,thumbnail_url,image_url,object_type,video_id}'})
     if q.status_code==200: meta.update(q.json())
-   video_meta={}
-   for c in [((v or {}).get('creative') or {}) for v in meta.values()]:
-    vid=str(c.get('video_id') or '')
-    if vid and vid not in video_meta:
-     vr=requests.get(f'{FB_BASE}/{vid}',timeout=30,params={'access_token':token,'fields':'source,picture,permalink_url'}); video_meta[vid]=vr.json() if vr.status_code==200 else {}
+   video_meta={}; video_ids=list({str(c.get('video_id')) for c in [((v or {}).get('creative') or {}) for v in meta.values()] if c.get('video_id')})
+   # 使用Graph多ID批量读取视频，避免逐视频请求导致全月采集耗时数分钟。
+   for i in range(0,len(video_ids),50):
+    vr=requests.get(FB_BASE,timeout=45,params={'access_token':token,'ids':','.join(video_ids[i:i+50]),'fields':'source,picture,permalink_url'})
+    if vr.status_code==200: video_meta.update(vr.json())
    for x in rows:
     adid=str(x.get('ad_id','')); m=meta.get(adid,{}) or {}; c=m.get('creative') or {}; cid=str(c.get('id') or adid); vid=str(c.get('video_id') or ''); vm=video_meta.get(vid,{})
     z=base_row(side,'facebook',aid,cid,c.get('name') or x.get('ad_name'),x.get('date_start')); typ=str(c.get('object_type','')).upper(); is_video=bool(vid or 'VIDEO' in typ)
@@ -203,6 +205,13 @@ def collect(month):
  summary={'creatives':len(active),'new_creatives':sum(x['is_new'] for x in active),'surge_creatives':sum(x['is_surge'] for x in active),'spend':round(sum(x['spend'] for x in active),2),'loans':sum(x['loans'] for x in active),'source_errors':len(errors)}; summary['cps']=round(summary['spend']/summary['loans'],2) if summary['loans'] else None
  return {'ok':True,'month':month,'range':{'start':start,'end':end,'pool_start':pool},'currency':'USD','data_time':now8().isoformat(),'summary':summary,'trend':dict(sorted(trend.items())),'items':items,'errors':errors}
 
+def collect_in_background(month):
+ try:
+  payload=collect(month); CACHE['data'][month]=payload; CACHE['ts'][month]=time.time()
+  with COLLECT_GUARD: COLLECT_STATE[month]={'status':'completed','started_at':COLLECT_STATE.get(month,{}).get('started_at'),'finished_at':now8().isoformat(),'error':None}
+ except Exception as e:
+  with COLLECT_GUARD: COLLECT_STATE[month]={'status':'failed','started_at':COLLECT_STATE.get(month,{}).get('started_at'),'finished_at':now8().isoformat(),'error':str(e)[:160]}
+
 def register_creative_dashboard(app):
  @app.route('/creative-dashboard')
  def creative_page():
@@ -210,10 +219,22 @@ def register_creative_dashboard(app):
  @app.route('/dashboard-api/creative-performance')
  def creative_api():
   month=request.args.get('month') or now8().strftime('%Y-%m'); key=month; t=time.time()
+  if not re.fullmatch(r'\d{4}-\d{2}',month): return jsonify({'ok':False,'error':'invalid month'}),400
   if key in CACHE['data'] and t-CACHE['ts'].get(key,0)<TTL:
    resp=jsonify({**CACHE['data'][key],'cached':True}); resp.headers['Cache-Control']='public, max-age=86400'; return resp
-  p=collect(month); CACHE['data'][key]=p; CACHE['ts'][key]=t
-  resp=jsonify({**p,'cached':False}); resp.headers['Cache-Control']='public, max-age=86400'; return resp
+  with COLLECT_GUARD:
+   state=COLLECT_STATE.get(key,{})
+   if state.get('status')!='collecting':
+    COLLECT_STATE[key]={'status':'collecting','started_at':now8().isoformat(),'finished_at':None,'error':None}
+    threading.Thread(target=collect_in_background,args=(key,),daemon=True,name=f'creative-{key}').start()
+   state=dict(COLLECT_STATE[key])
+  resp=jsonify({'ok':True,'month':key,'cached':False,**state}); resp.status_code=202; resp.headers['Cache-Control']='no-store'; resp.headers['Retry-After']='15'; return resp
+ @app.route('/dashboard-api/creative-performance-status')
+ def creative_status():
+  month=request.args.get('month') or now8().strftime('%Y-%m')
+  with COLLECT_GUARD: state=dict(COLLECT_STATE.get(month,{'status':'not_started','started_at':None,'finished_at':None,'error':None}))
+  state['cached']=month in CACHE['data'] and time.time()-CACHE['ts'].get(month,0)<TTL
+  return jsonify({'ok':True,'month':month,**state})
  @app.route('/dashboard-api/tiktok-video-url')
  def tiktok_video_url():
   advertiser_id=str(request.args.get('account_id') or '')
