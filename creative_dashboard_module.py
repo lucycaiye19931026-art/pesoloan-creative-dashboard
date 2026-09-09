@@ -35,7 +35,7 @@ def month_range(month):
  return start,end
 
 def env_list(name): return [x.strip() for x in os.getenv(name,'').split(',') if x.strip()]
-FB_ANDROID_DEFAULT=['2043458276522117','1338744840870824','554870820824463','1763443588125609','4425161567801548','3511882642320376','1654205562363513','1054117987058016','1842012880095946','1071912668521082','1016349321026924','893146393853948','1082060041158190','2468093726992507','1554822826379992']
+FB_ANDROID_DEFAULT=['2043458276522117','1338744840870824','554870820824463','1763443588125609','4425161567801548','3511882642320376','1654205562363513','1054117987058016','1842012880095946','1071912668521082','1016349321026924','1172024374104199','893146393853948','1082060041158190','2468093726992507','1554822826379992']
 FB_IOS_DEFAULT=['826668223504196','485941130935481','1050911951210157','2487386801730510']
 def config():
  tt_android=env_list('TT_ADV_IDS') or ([os.getenv('TT_ADV_ID','')] if os.getenv('TT_ADV_ID','') else [])
@@ -173,6 +173,8 @@ def aggregate(rows,month):
  _,month_end=month_range(month); end_date=datetime.strptime(month_end,'%Y-%m-%d').date(); anchor=now8().date() if month==now8().strftime('%Y-%m') else end_date+timedelta(days=1); last=[(anchor-timedelta(days=i)).isoformat() for i in range(1,4)]; prev=[(anchor-timedelta(days=i)).isoformat() for i in range(4,7)]
  for g in out:
   a=sum(g['daily'].get(d,{}).get('spend',0) for d in last); b=sum(g['daily'].get(d,{}).get('spend',0) for d in prev); growth=((a/3)/(b/3)-1)*100 if b>0 else (999 if a>0 else 0); g['recent3_spend']=round(a,2); g['previous3_spend']=round(b,2); g['spend_growth_pct']=round(growth,2); g['is_surge']=growth>=50 and a>=50 and g.get('month_rank',999)<=10; g['daily']={d:v for d,v in g['daily'].items() if d.startswith(month)}
+ # 月度主看板返回所选月份全部有消耗素材；Top 10仅用于排名和“消耗蹿升”条件。
+ out=[g for g in out if g.get('spend',0)>0]
  out.sort(key=lambda x:-x['spend']); return out,errors
 
 def collect(month):
@@ -203,7 +205,7 @@ def collect(month):
     for f in trend[d]:trend[d][f]+=v.get(f,0)
  active=[x for x in items if x['spend']>0]
  summary={'creatives':len(active),'new_creatives':sum(x['is_new'] for x in active),'surge_creatives':sum(x['is_surge'] for x in active),'spend':round(sum(x['spend'] for x in active),2),'loans':sum(x['loans'] for x in active),'source_errors':len(errors)}; summary['cps']=round(summary['spend']/summary['loans'],2) if summary['loans'] else None
- return {'ok':True,'month':month,'range':{'start':start,'end':end,'pool_start':pool},'currency':'USD','data_time':now8().isoformat(),'summary':summary,'trend':dict(sorted(trend.items())),'items':items,'errors':errors}
+ return {'ok':True,'month':month,'range':{'start':start,'end':end,'pool_start':pool},'currency':'USD','scope':{'mode':'all_spend_creatives','group_by':['side','channel','format'],'rank_metric':'spend','surge_requires_top10':True},'data_time':now8().isoformat(),'summary':summary,'trend':dict(sorted(trend.items())),'items':items,'errors':errors}
 
 def collect_in_background(month):
  try:
@@ -211,6 +213,76 @@ def collect_in_background(month):
   with COLLECT_GUARD: COLLECT_STATE[month]={'status':'completed','started_at':COLLECT_STATE.get(month,{}).get('started_at'),'finished_at':now8().isoformat(),'error':None}
  except Exception as e:
   with COLLECT_GUARD: COLLECT_STATE[month]={'status':'failed','started_at':COLLECT_STATE.get(month,{}).get('started_at'),'finished_at':now8().isoformat(),'error':str(e)[:160]}
+
+def resolve_facebook_ad(account_id,ad_id):
+ allowed=set(config()['fb_android']+config()['fb_ios'])
+ if account_id not in allowed or not re.fullmatch(r'\d+',ad_id): return {'ok':False,'error':'invalid account_id or ad_id'}
+ token=os.getenv('FB_LONG_TOKEN','')
+ try:
+  r=requests.get(f'{FB_BASE}/{ad_id}',timeout=30,params={'access_token':token,'fields':'id,name,account_id,creative{id,name,thumbnail_url,image_url,object_type,video_id}'})
+  body=r.json()
+  if r.status_code!=200 or body.get('error'): return {'ok':False,'error':'facebook ad lookup failed'}
+  returned_account=str(body.get('account_id') or '').replace('act_','')
+  if returned_account and returned_account!=account_id: return {'ok':False,'error':'facebook account mismatch'}
+  creative=body.get('creative') or {}; video_id=str(creative.get('video_id') or '')
+  preview=secure_url(creative.get('thumbnail_url') or creative.get('image_url')); media=''; player='image'
+  if video_id:
+   vr=requests.get(f'{FB_BASE}/{video_id}',timeout=30,params={'access_token':token,'fields':'source,picture,permalink_url'})
+   vd=vr.json() if vr.status_code==200 else {}
+   media=secure_url(vd.get('source')); preview=secure_url(vd.get('picture') or preview); player='video'
+  else: media=secure_url(creative.get('image_url') or preview)
+  return {'ok':bool(media or preview),'platform':'facebook','account_id':account_id,'ad_id':ad_id,'creative_id':str(creative.get('id') or ''),'creative_name':creative.get('name') or body.get('name') or ad_id,'video_id':video_id,'format':'video' if video_id else 'image','preview_url':preview,'media_url':media,'player_type':player,'error':None if (media or preview) else 'media unavailable'}
+ except Exception:return {'ok':False,'platform':'facebook','account_id':account_id,'ad_id':ad_id,'error':'facebook lookup exception'}
+
+def _tt_video_result(account_id,material_id,name,v):
+ video_id=str(v.get('video_id') or v.get('id') or '')
+ preview=secure_url(v.get('video_cover_url') or v.get('cover_url') or v.get('poster_url'))
+ media=secure_url(v.get('preview_url') or v.get('play_url') or v.get('video_url'))
+ return {'ok':bool(video_id and (media or preview)),'platform':'tiktok','account_id':account_id,'material_id':material_id,'creative_name':v.get('video_name') or v.get('file_name') or v.get('name') or name or material_id,'video_id':video_id,'format':'video','preview_url':preview,'media_url':media,'player_type':'video','error':None if (media or preview) else 'media unavailable'}
+
+def resolve_tiktok_material(account_id,material_id,name=''):
+ allowed=set(config()['tt_android']+config()['tt_ios'])
+ if account_id not in allowed or not re.fullmatch(r'[A-Za-z0-9_-]+',material_id): return {'ok':False,'error':'invalid account_id or material_id'}
+ headers={'Access-Token':os.getenv('TT_ACCESS_TOKEN','')}; target=norm(name)
+ try:
+  direct=requests.get(f'{TT_BASE}/file/video/ad/info/',headers=headers,timeout=30,params={'advertiser_id':account_id,'video_ids':json.dumps([material_id])}).json()
+  direct_rows=(direct.get('data') or {}).get('list',[]) if direct.get('code')==0 else []
+  if direct_rows:return _tt_video_result(account_id,material_id,name,direct_rows[0])
+  # 素材后台ID不一定等于video_id；在该广告账户的视频库中按ID或完整名称映射。
+  page=1; matched=None
+  while page<=50 and not matched:
+   sr=requests.get(f'{TT_BASE}/file/video/ad/search/',headers=headers,timeout=30,params={'advertiser_id':account_id,'page':page,'page_size':100}).json()
+   if sr.get('code')!=0: break
+   data=sr.get('data') or {}; rows=data.get('list') or data.get('videos') or []
+   for v in rows:
+    vid=str(v.get('video_id') or v.get('id') or '')
+    vn=norm(v.get('video_name') or v.get('file_name') or v.get('name'))
+    if vid==material_id or (target and vn==target): matched=v; break
+   info=data.get('page_info') or {}; total=int(info.get('total_page') or 0)
+   if not rows or len(rows)<100 or (total and page>=total): break
+   page+=1
+  if matched:
+   vid=str(matched.get('video_id') or matched.get('id') or '')
+   info=requests.get(f'{TT_BASE}/file/video/ad/info/',headers=headers,timeout=30,params={'advertiser_id':account_id,'video_ids':json.dumps([vid])}).json()
+   rows=(info.get('data') or {}).get('list',[]) if info.get('code')==0 else []
+   return _tt_video_result(account_id,material_id,name,rows[0] if rows else matched)
+  # 最后仅扫描本账户广告元数据，用广告名映射真实video_id；不读取报表或整月数据。
+  page=1
+  while page<=50:
+   ar=requests.get(f'{TT_BASE}/ad/get/',headers=headers,timeout=30,params={'advertiser_id':account_id,'fields':json.dumps(['ad_id','ad_name','video_id']),'page':page,'page_size':100}).json()
+   if ar.get('code')!=0: break
+   data=ar.get('data') or {}; rows=data.get('list') or []
+   for a in rows:
+    if str(a.get('video_id') or '')==material_id or (target and norm(a.get('ad_name'))==target):
+     vid=str(a.get('video_id') or '')
+     info=requests.get(f'{TT_BASE}/file/video/ad/info/',headers=headers,timeout=30,params={'advertiser_id':account_id,'video_ids':json.dumps([vid])}).json()
+     videos=(info.get('data') or {}).get('list',[]) if info.get('code')==0 else []
+     return _tt_video_result(account_id,material_id,name,videos[0] if videos else {'video_id':vid,'video_name':a.get('ad_name')})
+   info=data.get('page_info') or {}; total=int(info.get('total_page') or 0)
+   if not rows or len(rows)<100 or (total and page>=total): break
+   page+=1
+  return {'ok':False,'platform':'tiktok','account_id':account_id,'material_id':material_id,'error':'specified material not found in advertiser'}
+ except Exception:return {'ok':False,'platform':'tiktok','account_id':account_id,'material_id':material_id,'error':'tiktok lookup exception'}
 
 def register_creative_dashboard(app):
  @app.route('/creative-dashboard')
@@ -235,6 +307,33 @@ def register_creative_dashboard(app):
   with COLLECT_GUARD: state=dict(COLLECT_STATE.get(month,{'status':'not_started','started_at':None,'finished_at':None,'error':None}))
   state['cached']=month in CACHE['data'] and time.time()-CACHE['ts'].get(month,0)<TTL
   return jsonify({'ok':True,'month':month,**state})
+ @app.route('/august-top-creatives')
+ def august_top_creatives_page():
+  path=os.path.join(os.path.dirname(__file__),'august_top_creatives.html')
+  if not os.path.exists(path): return jsonify({'ok':False,'error':'report file unavailable'}),404
+  return Response(open(path,encoding='utf-8').read(),mimetype='text/html')
+
+ @app.route('/dashboard-api/specified-creatives',methods=['POST'])
+ def specified_creatives():
+  body=request.get_json(silent=True) or {}; specs=body.get('items') or []
+  if not isinstance(specs,list) or not specs or len(specs)>30: return jsonify({'ok':False,'error':'items must contain 1-30 records'}),400
+  jobs=[]
+  for i,s in enumerate(specs):
+   if not isinstance(s,dict): continue
+   platform=str(s.get('platform') or '').lower(); account=str(s.get('account_id') or '')
+   if platform=='facebook': jobs.append((i,resolve_facebook_ad,(account,str(s.get('ad_id') or ''))))
+   elif platform=='tiktok': jobs.append((i,resolve_tiktok_material,(account,str(s.get('material_id') or ''),str(s.get('name') or ''))))
+  results=[]
+  with ThreadPoolExecutor(max_workers=min(8,max(1,len(jobs)))) as ex:
+   futures={ex.submit(fn,*args):idx for idx,fn,args in jobs}
+   for f in as_completed(futures):
+    idx=futures[f]
+    try: result=f.result()
+    except Exception: result={'ok':False,'error':'specified creative lookup failed'}
+    result['request_index']=idx; results.append(result)
+  results.sort(key=lambda x:x.get('request_index',999))
+  resp=jsonify({'ok':True,'data_time':now8().isoformat(),'items':results}); resp.headers['Cache-Control']='no-store'; return resp
+
  @app.route('/dashboard-api/tiktok-video-url')
  def tiktok_video_url():
   advertiser_id=str(request.args.get('account_id') or '')

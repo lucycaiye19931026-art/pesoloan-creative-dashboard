@@ -6,6 +6,9 @@
 ## 地址
 部署后页面：`/creative-dashboard`
 数据接口：`/dashboard-api/creative-performance?month=YYYY-MM`
+采集状态：`/dashboard-api/creative-performance-status?month=YYYY-MM`
+指定素材报告：`/august-top-creatives`
+指定素材直查：`POST /dashboard-api/specified-creatives`
 
 ## 媒体范围
 - Android：Google Ads、Facebook、TikTok
@@ -66,4 +69,11 @@ CPS=`平台素材消耗÷Adjust素材loan数`；CR=`Adjust素材loan数÷Adjust�
 健康检查：`/health`
 看板页面：`/creative-dashboard`
 
-首次请求需跨媒体拉取素材池历史数据，可能较慢；成功后缓存5分钟。接口会返回`errors`和`source_errors`，不得把采集失败解释为零素材。
+首次请求需跨媒体拉取素材池历史数据，后台单任务采集并通过状态接口返回进度；成功后按月份缓存24小时。页面不做常驻自动刷新，仅在首次打开、切换月份或采集中进行轻量状态轮询。接口会返回`errors`和`source_errors`，不得把采集失败解释为零素材。
+
+## 指定素材直查
+- 不依赖月度缓存或Top 10。
+- Facebook按`account_id + ad_id`查询Creative、video_id、封面及播放源。
+- TikTok按`advertiser_id + material_id/素材名`映射真实video_id，再获取最新封面及播放源。
+- 单次最多30条，仅允许已配置账户；结果`Cache-Control: no-store`。
+- 优秀素材报告禁止引用广告后台截图作为视频预览。
