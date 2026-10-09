@@ -8,7 +8,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 import requests
-from flask import jsonify, request, Response
+import creative_cache_runtime as runtime
+from flask import jsonify, request, Response, send_file
 
 FB_BASE='https://graph.facebook.com/v19.0'
 TT_BASE='https://business-api.tiktok.com/open_api/v1.3'
@@ -52,14 +53,20 @@ def fb_rows(side,acts,start,end):
   try:
    r=requests.get(f'{FB_BASE}/act_{aid}/insights',timeout=45,params={'access_token':token,'level':'ad','fields':'ad_id,ad_name,spend,impressions,clicks,date_start','time_increment':1,'time_range':json.dumps({'since':start,'until':end}),'limit':5000})
    if r.status_code!=200: raise RuntimeError(f'HTTP {r.status_code}')
-   rows=r.json().get('data',[]); adids=list({str(x.get('ad_id')) for x in rows if x.get('ad_id')})
+   body=r.json(); rows=body.get('data',[])
+   while (body.get('paging') or {}).get('cursors',{}).get('after') and (body.get('paging') or {}).get('next'):
+    cursor=body['paging']['cursors']['after']
+    r=requests.get(f'{FB_BASE}/act_{aid}/insights',timeout=45,params={'access_token':token,'level':'ad','fields':'ad_id,ad_name,spend,impressions,clicks,date_start','time_increment':1,'time_range':json.dumps({'since':start,'until':end}),'limit':1000,'after':cursor})
+    if r.status_code!=200: raise RuntimeError(f'HTTP {r.status_code}')
+    body=r.json(); rows.extend(body.get('data',[]))
+   adids=list({str(x.get('ad_id')) for x in rows if x.get('ad_id')})
    meta={}
    for i in range(0,len(adids),50):
     q=requests.get(FB_BASE,timeout=45,params={'access_token':token,'ids':','.join(adids[i:i+50]),'fields':'name,created_time,creative{id,name,thumbnail_url,image_url,object_type,video_id}'})
     if q.status_code==200: meta.update(q.json())
    video_meta={}; video_ids=list({str(c.get('video_id')) for c in [((v or {}).get('creative') or {}) for v in meta.values()] if c.get('video_id')})
    # 使用Graph多ID批量读取视频，避免逐视频请求导致全月采集耗时数分钟。
-   for i in range(0,len(video_ids),50):
+   for i in range(0,len(video_ids) if os.getenv('CREATIVE_EAGER_VIDEO','0')=='1' else 0,50):
     vr=requests.get(FB_BASE,timeout=45,params={'access_token':token,'ids':','.join(video_ids[i:i+50]),'fields':'source,picture,permalink_url'})
     if vr.status_code==200: video_meta.update(vr.json())
    for x in rows:
@@ -98,13 +105,13 @@ def tt_rows(side,adv,start,end):
     for a in (q.json().get('data') or {}).get('list',[]): meta[str(a.get('ad_id'))]=a
   video_ids=list({str(a.get('video_id')) for a in meta.values() if a.get('video_id')}); video_meta={}
   # TikTok官方限制：/file/video/ad/info 每次最多60个video_ids。
-  for i in range(0,len(video_ids),60):
+  for i in range(0,len(video_ids) if os.getenv('CREATIVE_EAGER_VIDEO','0')=='1' else 0,60):
    vq=requests.get(f'{TT_BASE}/file/video/ad/info/',headers=headers,timeout=45,params={'advertiser_id':adv,'video_ids':json.dumps(video_ids[i:i+60])}); vd=vq.json()
    if vd.get('code')==0:
     for v in (vd.get('data') or {}).get('list',[]): video_meta[str(v.get('video_id'))]=v
   for x in rows:
    dim=x.get('dimensions') or {}; m=x.get('metrics') or {}; cid=str(dim.get('ad_id','')); a=meta.get(cid,{}); vid=str(a.get('video_id') or ''); vm=video_meta.get(vid,{}); images=a.get('image_ids') or []; is_video=bool(vid)
-   cover=secure_url(vm.get('video_cover_url') or vm.get('cover_url') or vm.get('poster_url')); media=secure_url(vm.get('preview_url') or vm.get('play_url') or vm.get('video_url'))
+   cover=secure_url(vm.get('video_cover_url') or vm.get('cover_url') or vm.get('poster_url') or a.get('video_cover_url') or a.get('image_url')); media=secure_url(vm.get('preview_url') or vm.get('play_url') or vm.get('video_url'))
    z=base_row(side,'tiktok',adv,cid,a.get('ad_name') or m.get('ad_name'),str(dim.get('stat_time_day',''))[:10]); z.update(spend=round(num(m.get('spend')),2),impressions=int(num(m.get('impressions'))),clicks=int(num(m.get('clicks'))),format='video' if is_video else 'image',preview_url=cover,media_url=media,player_type='video' if is_video else 'image',download_url=media,created_time=a.get('create_time'),image_ids=images,video_id=vid); out.append(z)
  except Exception as e: out.append({'side':side,'channel':'tiktok','account_id':adv,'source_status':'error','source_error':str(e)[:120]})
  return out
@@ -161,7 +168,7 @@ def merge_adjust(rows,adj):
 def aggregate(rows,month):
  good=[x for x in rows if x.get('source_status')=='ok']; errors=[x for x in rows if x.get('source_status')!='ok']; groups={}
  for x in good:
-  k=(x['side'],x['channel'],x['account_id'],x['creative_id']); g=groups.setdefault(k,{z:x.get(z) for z in ['side','channel','account_id','creative_id','creative_name','format','preview_url','media_url','player_type','download_url','created_time','attribution_status','video_id']}); g.setdefault('daily',{}); d=g['daily'].setdefault(x['day'],{'spend':0,'impressions':0,'clicks':0,'loans':0,'attribution_clicks':0});
+  k=(x['side'],x['channel'],x['account_id'],x['creative_id']); g=groups.setdefault(k,{z:x.get(z) for z in ['side','channel','account_id','creative_id','creative_name','format','preview_url','media_url','player_type','download_url','created_time','attribution_status','video_id','ad_id']}); g.setdefault('daily',{}); d=g['daily'].setdefault(x['day'],{'spend':0,'impressions':0,'clicks':0,'loans':0,'attribution_clicks':0});
   for f in d:d[f]+=num(x.get(f))
  out=[]
  for g in groups.values():
@@ -178,17 +185,20 @@ def aggregate(rows,month):
  out.sort(key=lambda x:-x['spend']); return out,errors
 
 def collect(month):
- start,end=month_range(month); pool=os.getenv('CREATIVE_POOL_START','2026-06-01'); cfg=config(); rows=[]; adj={}
+ start,end=month_range(month); pool=os.getenv('CREATIVE_POOL_START','2026-06-01'); history=os.getenv('CREATIVE_HISTORY_SCAN','0')=='1'; query_start=pool if history else start; cfg=config(); rows=[]; adj={}
  jobs=[]
- for aid in cfg['fb_android']: jobs.append(('rows',fb_rows,('android',[aid],pool,end)))
- for aid in cfg['fb_ios']: jobs.append(('rows',fb_rows,('ios',[aid],pool,end)))
- for aid in cfg['tt_android']: jobs.append(('rows',tt_rows,('android',aid,pool,end)))
- for aid in cfg['tt_ios']: jobs.append(('rows',tt_rows,('ios',aid,pool,end)))
- jobs += [('rows',gg_rows,(cfg['gg_android'],pool,end)),('adj_android',adjust_rows,('android',pool,end)),('adj_ios',adjust_rows,('ios',pool,end))]
- with ThreadPoolExecutor(max_workers=12) as ex:
-  futures={ex.submit(fn,*args):kind for kind,fn,args in jobs}
+ for aid in cfg['fb_android']: jobs.append(('rows',fb_rows,('android',[aid],query_start,end)))
+ for aid in cfg['fb_ios']: jobs.append(('rows',fb_rows,('ios',[aid],query_start,end)))
+ for aid in cfg['tt_android']: jobs.append(('rows',tt_rows,('android',aid,query_start,end)))
+ for aid in cfg['tt_ios']: jobs.append(('rows',tt_rows,('ios',aid,query_start,end)))
+ jobs += [('rows',gg_rows,(cfg['gg_android'],query_start,end)),('adj_android',adjust_rows,('android',start,end)),('adj_ios',adjust_rows,('ios',start,end))]
+ runtime.progress(month,0,len(jobs),'开始按账户读取')
+ with ThreadPoolExecutor(max_workers=4) as ex:
+  futures={ex.submit(runtime.checkpoint,month,kind+':'+fn.__name__,fn,args):(kind,fn.__name__) for kind,fn,args in jobs}
+  done=0
   for f in as_completed(futures):
-   kind=futures[f]
+   kind,source=futures[f]; done+=1
+   runtime.progress(month,done,len(jobs),source)
    try:
     value=f.result()
     if kind=='rows': rows.extend(value or [])
@@ -197,7 +207,11 @@ def collect(month):
     if kind=='rows': rows.append({'side':'unknown','channel':'unknown','source_status':'error','source_error':str(e)[:120]})
     else: adj[kind]=([],str(e)[:120])
  aa,ae=adj.get('adj_android',([], 'adjust android timeout')); ia,ie=adj.get('adj_ios',([], 'adjust ios timeout')); rows=merge_adjust([x for x in rows if x.get('side')=='android'],aa)+merge_adjust([x for x in rows if x.get('side')=='ios'],ia)+[x for x in rows if x.get('side') not in ('android','ios')]
- items,errors=aggregate(rows,month); errors += ([{'side':'android','channel':'adjust','source_status':'error','source_error':ae}] if ae else []) + ([{'side':'ios','channel':'adjust','source_status':'error','source_error':ie}] if ie else [])
+ items,errors=aggregate(rows,month)
+ if not history:
+  for item in items:
+   item['is_new']=False; item['first_spend_date']=None; item['first_spend_status']='history_not_verified'
+ errors += ([{'side':'android','channel':'adjust','source_status':'error','source_error':ae}] if ae else []) + ([{'side':'ios','channel':'adjust','source_status':'error','source_error':ie}] if ie else [])
  trend=defaultdict(lambda:{'spend':0,'impressions':0,'clicks':0,'loans':0})
  for x in items:
   for d,v in x['daily'].items():
@@ -205,7 +219,7 @@ def collect(month):
     for f in trend[d]:trend[d][f]+=v.get(f,0)
  active=[x for x in items if x['spend']>0]
  summary={'creatives':len(active),'new_creatives':sum(x['is_new'] for x in active),'surge_creatives':sum(x['is_surge'] for x in active),'spend':round(sum(x['spend'] for x in active),2),'loans':sum(x['loans'] for x in active),'source_errors':len(errors)}; summary['cps']=round(summary['spend']/summary['loans'],2) if summary['loans'] else None
- return {'ok':True,'month':month,'range':{'start':start,'end':end,'pool_start':pool},'currency':'USD','scope':{'mode':'all_spend_creatives','group_by':['side','channel','format'],'rank_metric':'spend','surge_requires_top10':True},'data_time':now8().isoformat(),'summary':summary,'trend':dict(sorted(trend.items())),'items':items,'errors':errors}
+ return {'ok':True,'month':month,'range':{'start':start,'end':end,'pool_start':pool},'currency':'USD','scope':{'history_verified':history,'query_start':query_start,'mode':'all_spend_creatives','group_by':['side','channel','format'],'rank_metric':'spend','surge_requires_top10':True},'data_time':now8().isoformat(),'summary':summary,'trend':dict(sorted(trend.items())),'items':items,'errors':errors}
 
 def collect_in_background(month):
  try:
@@ -290,28 +304,32 @@ def register_creative_dashboard(app):
   path=os.path.join(os.path.dirname(__file__),'creative_dashboard.html'); return Response(open(path,encoding='utf-8').read(),mimetype='text/html')
  @app.route('/dashboard-api/creative-performance')
  def creative_api():
-  month=request.args.get('month') or now8().strftime('%Y-%m'); key=month; t=time.time()
-  if not re.fullmatch(r'\d{4}-\d{2}',month): return jsonify({'ok':False,'error':'invalid month'}),400
-  if key in CACHE['data'] and t-CACHE['ts'].get(key,0)<TTL:
-   resp=jsonify({**CACHE['data'][key],'cached':True}); resp.headers['Cache-Control']='public, max-age=86400'; return resp
-  with COLLECT_GUARD:
-   state=COLLECT_STATE.get(key,{})
-   if state.get('status')!='collecting':
-    COLLECT_STATE[key]={'status':'collecting','started_at':now8().isoformat(),'finished_at':None,'error':None}
-    threading.Thread(target=collect_in_background,args=(key,),daemon=True,name=f'creative-{key}').start()
-   state=dict(COLLECT_STATE[key])
-  resp=jsonify({'ok':True,'month':key,'cached':False,**state}); resp.status_code=202; resp.headers['Cache-Control']='no-store'; resp.headers['Retry-After']='15'; return resp
+  month=request.args.get('month') or now8().strftime('%Y-%m')
+  try:
+   if not re.fullmatch(r'\d{4}-\d{2}',month): raise ValueError()
+   month_range(month)
+  except ValueError: return jsonify({'ok':False,'error':'invalid month'}),400
+  hit=runtime.read('result:'+month)
+  if hit:
+   resp=jsonify({**hit,'cached':True,'status':'partial' if hit.get('errors') else 'completed'}); resp.headers['Cache-Control']='no-store'; return resp
+  runtime.launch(month,collect)
+  resp=jsonify({'ok':True,'month':month,**runtime.status(month)}); resp.status_code=202; resp.headers['Cache-Control']='no-store'; resp.headers['Retry-After']='15'; return resp
  @app.route('/dashboard-api/creative-performance-status')
  def creative_status():
   month=request.args.get('month') or now8().strftime('%Y-%m')
-  with COLLECT_GUARD: state=dict(COLLECT_STATE.get(month,{'status':'not_started','started_at':None,'finished_at':None,'error':None}))
-  state['cached']=month in CACHE['data'] and time.time()-CACHE['ts'].get(month,0)<TTL
-  return jsonify({'ok':True,'month':month,**state})
+  if not re.fullmatch(r'\d{4}-\d{2}',month): return jsonify({'ok':False,'error':'invalid month'}),400
+  resp=jsonify({'ok':True,'month':month,**runtime.status(month)}); resp.headers['Cache-Control']='no-store'; return resp
  @app.route('/august-top-creatives')
  def august_top_creatives_page():
   path=os.path.join(os.path.dirname(__file__),'august_top_creatives.html')
   if not os.path.exists(path): return jsonify({'ok':False,'error':'report file unavailable'}),404
   return Response(open(path,encoding='utf-8').read(),mimetype='text/html')
+
+ @app.route('/august-top-creatives/assets/fb_top3.png')
+ def august_top_creatives_fb_top3():
+  path=os.path.join(os.path.dirname(__file__),'fb_top3.png')
+  if not os.path.exists(path): return jsonify({'ok':False,'error':'asset file unavailable'}),404
+  return send_file(path,mimetype='image/png',max_age=86400)
 
  @app.route('/dashboard-api/specified-creatives',methods=['POST'])
  def specified_creatives():
