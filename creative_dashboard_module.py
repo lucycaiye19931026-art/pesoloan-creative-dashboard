@@ -9,6 +9,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 import requests
 import creative_cache_runtime as runtime
+from creative_playback import register_playback, video_ids
 from flask import jsonify, request, Response, send_file
 
 FB_BASE='https://graph.facebook.com/v19.0'
@@ -62,7 +63,7 @@ def fb_rows(side,acts,start,end):
    adids=list({str(x.get('ad_id')) for x in rows if x.get('ad_id')})
    meta={}
    for i in range(0,len(adids),50):
-    q=requests.get(FB_BASE,timeout=45,params={'access_token':token,'ids':','.join(adids[i:i+50]),'fields':'name,created_time,creative{id,name,thumbnail_url,image_url,object_type,video_id}'})
+    q=requests.get(FB_BASE,timeout=45,params={'access_token':token,'ids':','.join(adids[i:i+50]),'fields':'name,created_time,creative{id,name,thumbnail_url,image_url,object_type,video_id,object_story_spec,asset_feed_spec}'})
     if q.status_code==200: meta.update(q.json())
    video_meta={}; video_ids=list({str(c.get('video_id')) for c in [((v or {}).get('creative') or {}) for v in meta.values()] if c.get('video_id')})
    # 使用Graph多ID批量读取视频，避免逐视频请求导致全月采集耗时数分钟。
@@ -70,9 +71,9 @@ def fb_rows(side,acts,start,end):
     vr=requests.get(FB_BASE,timeout=45,params={'access_token':token,'ids':','.join(video_ids[i:i+50]),'fields':'source,picture,permalink_url'})
     if vr.status_code==200: video_meta.update(vr.json())
    for x in rows:
-    adid=str(x.get('ad_id','')); m=meta.get(adid,{}) or {}; c=m.get('creative') or {}; cid=str(c.get('id') or adid); vid=str(c.get('video_id') or ''); vm=video_meta.get(vid,{})
+    adid=str(x.get('ad_id','')); m=meta.get(adid,{}) or {}; c=m.get('creative') or {}; cid=str(c.get('id') or adid); vid=str(c.get('video_id') or next(iter(video_ids(c)),'')); vm=video_meta.get(vid,{})
     z=base_row(side,'facebook',aid,cid,c.get('name') or x.get('ad_name'),x.get('date_start')); typ=str(c.get('object_type','')).upper(); is_video=bool(vid or 'VIDEO' in typ)
-    z.update(spend=round(num(x.get('spend')),2),impressions=int(num(x.get('impressions'))),clicks=int(num(x.get('clicks'))),format='video' if is_video else 'image',preview_url=c.get('thumbnail_url') or vm.get('picture') or c.get('image_url'),media_url=vm.get('source') if is_video else c.get('image_url'),player_type='video' if is_video else 'image',download_url=vm.get('source') if is_video else c.get('image_url'),created_time=m.get('created_time'),ad_id=adid); out.append(z)
+    z.update(spend=round(num(x.get('spend')),2),impressions=int(num(x.get('impressions'))),clicks=int(num(x.get('clicks'))),format='video' if is_video else 'image',preview_url=c.get('thumbnail_url') or vm.get('picture') or c.get('image_url'),media_url=vm.get('source') if is_video else c.get('image_url'),player_type='video' if is_video else 'image',download_url=vm.get('source') if is_video else c.get('image_url'),created_time=m.get('created_time'),ad_id=adid,video_id=vid,video_ids=video_ids(c)); out.append(z)
   except Exception as e: out.append({'side':side,'channel':'facebook','account_id':aid,'source_status':'error','source_error':str(e)[:120]})
  return out
 
@@ -168,7 +169,7 @@ def merge_adjust(rows,adj):
 def aggregate(rows,month):
  good=[x for x in rows if x.get('source_status')=='ok']; errors=[x for x in rows if x.get('source_status')!='ok']; groups={}
  for x in good:
-  k=(x['side'],x['channel'],x['account_id'],x['creative_id']); g=groups.setdefault(k,{z:x.get(z) for z in ['side','channel','account_id','creative_id','creative_name','format','preview_url','media_url','player_type','download_url','created_time','attribution_status','video_id','ad_id']}); g.setdefault('daily',{}); d=g['daily'].setdefault(x['day'],{'spend':0,'impressions':0,'clicks':0,'loans':0,'attribution_clicks':0});
+  k=(x['side'],x['channel'],x['account_id'],x['creative_id']); g=groups.setdefault(k,{z:x.get(z) for z in ['side','channel','account_id','creative_id','creative_name','format','preview_url','media_url','player_type','download_url','created_time','attribution_status','video_id','video_ids','ad_id']}); g.setdefault('daily',{}); d=g['daily'].setdefault(x['day'],{'spend':0,'impressions':0,'clicks':0,'loans':0,'attribution_clicks':0});
   for f in d:d[f]+=num(x.get(f))
  out=[]
  for g in groups.values():
@@ -233,7 +234,7 @@ def resolve_facebook_ad(account_id,ad_id):
  if account_id not in allowed or not re.fullmatch(r'\d+',ad_id): return {'ok':False,'error':'invalid account_id or ad_id'}
  token=os.getenv('FB_LONG_TOKEN','')
  try:
-  r=requests.get(f'{FB_BASE}/{ad_id}',timeout=30,params={'access_token':token,'fields':'id,name,account_id,creative{id,name,thumbnail_url,image_url,object_type,video_id}'})
+  r=requests.get(f'{FB_BASE}/{ad_id}',timeout=30,params={'access_token':token,'fields':'id,name,account_id,creative{id,name,thumbnail_url,image_url,object_type,video_id,object_story_spec,asset_feed_spec}'})
   body=r.json()
   if r.status_code!=200 or body.get('error'): return {'ok':False,'error':'facebook ad lookup failed'}
   returned_account=str(body.get('account_id') or '').replace('act_','')
@@ -299,6 +300,7 @@ def resolve_tiktok_material(account_id,material_id,name=''):
  except Exception:return {'ok':False,'platform':'tiktok','account_id':account_id,'material_id':material_id,'error':'tiktok lookup exception'}
 
 def register_creative_dashboard(app):
+ register_playback(app, config, FB_BASE, TT_BASE)
  @app.route('/creative-dashboard')
  def creative_page():
   path=os.path.join(os.path.dirname(__file__),'creative_dashboard.html'); return Response(open(path,encoding='utf-8').read(),mimetype='text/html')
