@@ -9,7 +9,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 import requests
 import creative_cache_runtime as runtime
-from creative_playback import register_playback, video_ids
+from creative_playback import register_playback, video_ids as extract_video_ids
 from flask import jsonify, request, Response, send_file
 
 FB_BASE='https://graph.facebook.com/v19.0'
@@ -37,12 +37,12 @@ def month_range(month):
  return start,end
 
 def env_list(name): return [x.strip() for x in os.getenv(name,'').split(',') if x.strip()]
-FB_ANDROID_DEFAULT=['2043458276522117','1338744840870824','554870820824463','1763443588125609','4425161567801548','3511882642320376','1654205562363513','1054117987058016','1842012880095946','1071912668521082','1016349321026924','1172024374104199','893146393853948','1082060041158190','2468093726992507','1554822826379992']
+FB_ANDROID_DEFAULT=['1387541973151493','1461810079456801','1480326117580059','2043458276522117','1338744840870824','554870820824463','1763443588125609','4425161567801548','3511882642320376','1654205562363513','1054117987058016','1842012880095946','1071912668521082','1016349321026924','1172024374104199','893146393853948','1082060041158190','2468093726992507','1554822826379992']
 FB_IOS_DEFAULT=['826668223504196','485941130935481','1050911951210157','2487386801730510']
 def config():
  tt_android=env_list('TT_ADV_IDS') or ([os.getenv('TT_ADV_ID','')] if os.getenv('TT_ADV_ID','') else [])
  tt_ios=env_list('TT_IOS_ADV_IDS') or ([os.getenv('TT_IOS_ADV_ID','')] if os.getenv('TT_IOS_ADV_ID','') else [])
- return {'fb_android':env_list('CREATIVE_FB_ANDROID_IDS') or env_list('FB_ACT_IDS') or FB_ANDROID_DEFAULT,'fb_ios':env_list('CREATIVE_FB_IOS_IDS') or env_list('FB_IOS_ACT_IDS') or FB_IOS_DEFAULT,'tt_android':tt_android,'tt_ios':tt_ios,'gg_android':env_list('GG_CUSTOMER_IDS') or ['3375325268','4223410058']}
+ return {'fb_android':env_list('CREATIVE_FB_ANDROID_IDS') or env_list('FB_ACT_IDS') or FB_ANDROID_DEFAULT,'fb_ios':env_list('CREATIVE_FB_IOS_IDS') or env_list('FB_IOS_ACT_IDS') or FB_IOS_DEFAULT,'tt_android':tt_android,'tt_ios':tt_ios,'gg_android':env_list('GG_CUSTOMER_IDS') or ['3375325268','4223410058'],'gg_ios':env_list('GG_IOS_CUSTOMER_IDS') or ['5716382613']}
 
 def base_row(side,channel,account_id,cid,name,day):
  return {'side':side,'channel':channel,'account_id':str(account_id),'creative_id':str(cid),'creative_name':name or str(cid),'day':day,'format':'unknown','spend':0.0,'impressions':0,'clicks':0,'loans':0,'preview_url':None,'media_url':None,'player_type':None,'download_url':None,'created_time':None,'source_status':'ok','attribution_status':'unmatched'}
@@ -71,9 +71,9 @@ def fb_rows(side,acts,start,end):
     vr=requests.get(FB_BASE,timeout=45,params={'access_token':token,'ids':','.join(video_ids[i:i+50]),'fields':'source,picture,permalink_url'})
     if vr.status_code==200: video_meta.update(vr.json())
    for x in rows:
-    adid=str(x.get('ad_id','')); m=meta.get(adid,{}) or {}; c=m.get('creative') or {}; cid=str(c.get('id') or adid); vid=str(c.get('video_id') or next(iter(video_ids(c)),'')); vm=video_meta.get(vid,{})
+    adid=str(x.get('ad_id','')); m=meta.get(adid,{}) or {}; c=m.get('creative') or {}; cid=str(c.get('id') or adid); vid=str(c.get('video_id') or next(iter(extract_video_ids(c)),'')); vm=video_meta.get(vid,{})
     z=base_row(side,'facebook',aid,cid,c.get('name') or x.get('ad_name'),x.get('date_start')); typ=str(c.get('object_type','')).upper(); is_video=bool(vid or 'VIDEO' in typ)
-    z.update(spend=round(num(x.get('spend')),2),impressions=int(num(x.get('impressions'))),clicks=int(num(x.get('clicks'))),format='video' if is_video else 'image',preview_url=c.get('thumbnail_url') or vm.get('picture') or c.get('image_url'),media_url=vm.get('source') if is_video else c.get('image_url'),player_type='video' if is_video else 'image',download_url=vm.get('source') if is_video else c.get('image_url'),created_time=m.get('created_time'),ad_id=adid,video_id=vid,video_ids=video_ids(c)); out.append(z)
+    z.update(spend=round(num(x.get('spend')),2),impressions=int(num(x.get('impressions'))),clicks=int(num(x.get('clicks'))),format='video' if is_video else 'image',preview_url=c.get('thumbnail_url') or vm.get('picture') or c.get('image_url'),media_url=vm.get('source') if is_video else c.get('image_url'),player_type='video' if is_video else 'image',download_url=vm.get('source') if is_video else c.get('image_url'),created_time=m.get('created_time'),ad_id=adid,video_id=vid,video_ids=extract_video_ids(c)); out.append(z)
   except Exception as e: out.append({'side':side,'channel':'facebook','account_id':aid,'source_status':'error','source_error':str(e)[:120]})
  return out
 
@@ -121,7 +121,7 @@ def gg_token():
  try:
   r=requests.post('https://oauth2.googleapis.com/token',timeout=20,data={'client_id':os.getenv('GG_CLIENT_ID',''),'client_secret':os.getenv('GG_CLIENT_SECRET',''),'refresh_token':os.getenv('GG_REFRESH_TOKEN',''),'grant_type':'refresh_token'}); return r.json().get('access_token','')
  except:return ''
-def gg_rows(customers,start,end):
+def gg_rows(customers,start,end,side='android'):
  out=[]; token=gg_token(); headers={'Authorization':f'Bearer {token}','developer-token':os.getenv('GG_DEVELOPER_TOKEN',''),'login-customer-id':os.getenv('GG_MCC_ID',''),'Content-Type':'application/json'}
  q=f"SELECT customer.id, ad_group_ad.ad.id, asset.id, asset.name, asset.type, asset.image_asset.full_size.url, asset.youtube_video_asset.youtube_video_id, segments.date, metrics.cost_micros, metrics.impressions, metrics.clicks FROM ad_group_ad_asset_view WHERE segments.date BETWEEN '{start}' AND '{end}' AND metrics.cost_micros > 0"
  for cid in customers:
@@ -136,8 +136,8 @@ def gg_rows(customers,start,end):
      # ad_group_ad_asset_view也会返回标题、描述等文字Asset；素材看板只允许真实图片/视频。
      if not image and not video: continue
      preview=image or f'https://i.ytimg.com/vi/{video}/hqdefault.jpg'; fmt='video' if video else 'image'
-     z=base_row('android','google',cid,cid2,asset.get('name') or cid2,seg.get('date')); z.update(spend=round(num(met.get('costMicros'))/1e6,2),impressions=int(num(met.get('impressions'))),clicks=int(num(met.get('clicks'))),format=fmt,preview_url=preview,media_url=f'https://www.youtube.com/embed/{video}?autoplay=1&rel=0' if video else image,player_type='youtube' if video else 'image',download_url=image,ad_id=aid); out.append(z)
-  except Exception as e: out.append({'side':'android','channel':'google','account_id':cid,'source_status':'error','source_error':str(e)[:120]})
+     z=base_row(side,'google',cid,cid2,asset.get('name') or cid2,seg.get('date')); z.update(spend=round(num(met.get('costMicros'))/1e6,2),impressions=int(num(met.get('impressions'))),clicks=int(num(met.get('clicks'))),format=fmt,preview_url=preview,media_url=f'https://www.youtube.com/embed/{video}?autoplay=1&rel=0' if video else image,player_type='youtube' if video else 'image',download_url=image,ad_id=aid); out.append(z)
+  except Exception as e: out.append({'side':side,'channel':'google','account_id':cid,'source_status':'error','source_error':str(e)[:120]})
  return out
 
 def adjust_rows(side,start,end):
@@ -192,7 +192,7 @@ def collect(month):
  for aid in cfg['fb_ios']: jobs.append(('rows',fb_rows,('ios',[aid],query_start,end)))
  for aid in cfg['tt_android']: jobs.append(('rows',tt_rows,('android',aid,query_start,end)))
  for aid in cfg['tt_ios']: jobs.append(('rows',tt_rows,('ios',aid,query_start,end)))
- jobs += [('rows',gg_rows,(cfg['gg_android'],query_start,end)),('adj_android',adjust_rows,('android',start,end)),('adj_ios',adjust_rows,('ios',start,end))]
+ jobs += [('rows',gg_rows,(cfg['gg_android'],query_start,end,'android')),('rows',gg_rows,(cfg['gg_ios'],query_start,end,'ios')),('adj_android',adjust_rows,('android',start,end)),('adj_ios',adjust_rows,('ios',start,end))]
  runtime.progress(month,0,len(jobs),'开始按账户读取')
  with ThreadPoolExecutor(max_workers=4) as ex:
   futures={ex.submit(runtime.checkpoint,month,kind+':'+fn.__name__,fn,args):(kind,fn.__name__) for kind,fn,args in jobs}
@@ -311,7 +311,7 @@ def register_creative_dashboard(app):
    if not re.fullmatch(r'\d{4}-\d{2}',month): raise ValueError()
    month_range(month)
   except ValueError: return jsonify({'ok':False,'error':'invalid month'}),400
-  hit=runtime.read('result:'+month)
+  hit=runtime.read('result:fb-parser-v3:'+month)
   if hit:
    resp=jsonify({**hit,'cached':True,'status':'partial' if hit.get('errors') else 'completed'}); resp.headers['Cache-Control']='no-store'; return resp
   runtime.launch(month,collect)
